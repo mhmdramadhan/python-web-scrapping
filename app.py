@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, send_file
 import requests
 from bs4 import BeautifulSoup
 import json
@@ -6,12 +6,13 @@ from datetime import datetime
 import re
 from urllib.parse import urljoin, urlparse
 import time
+import csv
+import io
 
 app = Flask(__name__)
 
-# Template HTML untuk UI (tidak berubah dari sebelumnya)
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+# Template HTML untuk UI
+HTML_TEMPLATE = '''<!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
@@ -234,6 +235,19 @@ HTML_TEMPLATE = """
             flex: 1;
             min-width: 200px;
         }
+        .download-options {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 10px;
+            margin-bottom: 20px;
+        }
+        .download-options select {
+            margin-left: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
     </style>
 </head>
 <body>
@@ -299,7 +313,19 @@ HTML_TEMPLATE = """
                     <button class="tab" data-tab="headings">Headings</button>
                 </div>
                 
-                <div id="downloadButtons"></div>
+                <div class="download-options" id="downloadOptions">
+                    <strong>Download Options:</strong><br>
+                    <button class="download-btn" onclick="downloadJSON()">📥 Download JSON</button>
+                    <select id="csvType">
+                        <option value="all">Semua Data</option>
+                        <option value="links">Links</option>
+                        <option value="images">Gambar</option>
+                        <option value="text">Teks</option>
+                        <option value="headings">Headings</option>
+                    </select>
+                    <button class="download-btn" onclick="downloadCSV()">📥 Download CSV</button>
+                    <button class="download-btn" onclick="downloadAllPages()">📥 Download Semua Halaman</button>
+                </div>
                 
                 <div class="tab-content active" id="links-content"></div>
                 <div class="tab-content" id="images-content"></div>
@@ -313,6 +339,7 @@ HTML_TEMPLATE = """
     
     <script>
         let scrapedData = null;
+        let currentScrapeType = 'all';
         
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -334,6 +361,9 @@ HTML_TEMPLATE = """
             const maxPages = document.getElementById('maxPages').value;
             const pageDelay = document.getElementById('pageDelay').value;
             const enablePagination = document.getElementById('enablePagination').checked;
+            
+            // Save current scrape type
+            currentScrapeType = scrapeType;
             
             // Show loading
             document.getElementById('loading').classList.add('active');
@@ -379,118 +409,255 @@ HTML_TEMPLATE = """
             // Pagination info
             const paginationInfo = document.getElementById('paginationInfo');
             if (data.total_pages > 1) {
-                paginationInfo.innerHTML = `
-                    <strong>📄 Informasi Pagination:</strong><br>
-                    • Total halaman yang di-scrape: ${data.total_pages}<br>
-                    • Total waktu scraping: ${data.total_time.toFixed(2)} detik<br>
-                    • URL dasar: ${data.base_url}<br>
-                    • Halaman terakhir: ${data.last_page_url || 'N/A'}
-                `;
+                paginationInfo.innerHTML = '<strong>📄 Informasi Pagination:</strong><br>' +
+                    '• Total halaman yang di-scrape: ' + data.total_pages + '<br>' +
+                    '• Total waktu scraping: ' + data.total_time.toFixed(2) + ' detik<br>' +
+                    '• URL dasar: ' + data.base_url + '<br>' +
+                    '• Halaman terakhir: ' + (data.last_page_url || 'N/A');
                 paginationInfo.style.display = 'block';
             } else {
                 paginationInfo.style.display = 'none';
             }
             
+            // Update CSV type selector based on scrape type
+            const csvTypeSelect = document.getElementById('csvType');
+            if (currentScrapeType !== 'all') {
+                csvTypeSelect.value = currentScrapeType;
+            }
+            
             // Stats
             const stats = document.getElementById('stats');
-            stats.innerHTML = `
-                <div class="stat-card">
-                    <div class="stat-number">${data.links.length}</div>
-                    <div class="stat-label">Links</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${data.images.length}</div>
-                    <div class="stat-label">Gambar</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${data.paragraphs.length}</div>
-                    <div class="stat-label">Paragraf</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">${data.headings.length}</div>
-                    <div class="stat-label">Headings</div>
-                </div>
-            `;
-            
-            // Download buttons
-            const downloadButtons = document.getElementById('downloadButtons');
-            downloadButtons.innerHTML = `
-                <button class="download-btn" onclick="downloadJSON()">📥 Download JSON</button>
-                <button class="download-btn" onclick="downloadCSV()">📥 Download CSV</button>
-                <button class="download-btn" onclick="downloadAllPages()">📥 Download Semua Halaman</button>
-            `;
+            stats.innerHTML = '<div class="stat-card">' +
+                '<div class="stat-number">' + data.links.length + '</div>' +
+                '<div class="stat-label">Links</div>' +
+                '</div>' +
+                '<div class="stat-card">' +
+                '<div class="stat-number">' + data.images.length + '</div>' +
+                '<div class="stat-label">Gambar</div>' +
+                '</div>' +
+                '<div class="stat-card">' +
+                '<div class="stat-number">' + data.paragraphs.length + '</div>' +
+                '<div class="stat-label">Paragraf</div>' +
+                '</div>' +
+                '<div class="stat-card">' +
+                '<div class="stat-number">' + data.headings.length + '</div>' +
+                '<div class="stat-label">Headings</div>' +
+                '</div>';
             
             // Links
             const linksContent = document.getElementById('links-content');
-            linksContent.innerHTML = data.links.map(link => `
-                <div class="item">
-                    <div class="item-title">${link.text || 'No text'}</div>
-                    <div class="item-content">${link.url} ${link.page ? `(Halaman ${link.page})` : ''}</div>
-                </div>
-            `).join('') || '<p>Tidak ada link ditemukan</p>';
+            if (data.links && data.links.length > 0) {
+                let linksHtml = '';
+                data.links.forEach(link => {
+                    linksHtml += '<div class="item">' +
+                        '<div class="item-title">' + (link.text || 'No text') + '</div>' +
+                        '<div class="item-content">' + link.url + (link.page ? ' (Halaman ' + link.page + ')' : '') + '</div>' +
+                        '</div>';
+                });
+                linksContent.innerHTML = linksHtml;
+            } else {
+                linksContent.innerHTML = '<p>Tidak ada link ditemukan</p>';
+            }
             
             // Images
             const imagesContent = document.getElementById('images-content');
-            imagesContent.innerHTML = data.images.map(img => `
-                <div class="item">
-                    <div class="item-title">${img.alt || 'No alt text'}</div>
-                    <div class="item-content">${img.src} ${img.page ? `(Halaman ${img.page})` : ''}</div>
-                </div>
-            `).join('') || '<p>Tidak ada gambar ditemukan</p>';
+            if (data.images && data.images.length > 0) {
+                let imagesHtml = '';
+                data.images.forEach(img => {
+                    imagesHtml += '<div class="item">' +
+                        '<div class="item-title">' + (img.alt || 'No alt text') + '</div>' +
+                        '<div class="item-content">' + img.src + (img.page ? ' (Halaman ' + img.page + ')' : '') + '</div>' +
+                        '</div>';
+                });
+                imagesContent.innerHTML = imagesHtml;
+            } else {
+                imagesContent.innerHTML = '<p>Tidak ada gambar ditemukan</p>';
+            }
             
             // Text
             const textContent = document.getElementById('text-content');
-            textContent.innerHTML = data.paragraphs.map(text => `
-                <div class="item">
-                    <div class="item-content">${text.content} ${text.page ? `(Halaman ${text.page})` : ''}</div>
-                </div>
-            `).join('') || '<p>Tidak ada teks ditemukan</p>';
+            if (data.paragraphs && data.paragraphs.length > 0) {
+                let textHtml = '';
+                data.paragraphs.forEach(text => {
+                    textHtml += '<div class="item">' +
+                        '<div class="item-content">' + text.content + (text.page ? ' (Halaman ' + text.page + ')' : '') + '</div>' +
+                        '</div>';
+                });
+                textContent.innerHTML = textHtml;
+            } else {
+                textContent.innerHTML = '<p>Tidak ada teks ditemukan</p>';
+            }
             
             // Headings
             const headingsContent = document.getElementById('headings-content');
-            headingsContent.innerHTML = data.headings.map(h => `
-                <div class="item">
-                    <div class="item-title">${h.level}</div>
-                    <div class="item-content">${h.text} ${h.page ? `(Halaman ${h.page})` : ''}</div>
-                </div>
-            `).join('') || '<p>Tidak ada heading ditemukan</p>';
+            if (data.headings && data.headings.length > 0) {
+                let headingsHtml = '';
+                data.headings.forEach(h => {
+                    headingsHtml += '<div class="item">' +
+                        '<div class="item-title">' + h.level + '</div>' +
+                        '<div class="item-content">' + h.text + (h.page ? ' (Halaman ' + h.page + ')' : '') + '</div>' +
+                        '</div>';
+                });
+                headingsContent.innerHTML = headingsHtml;
+            } else {
+                headingsContent.innerHTML = '<p>Tidak ada heading ditemukan</p>';
+            }
             
             document.getElementById('results').classList.add('active');
         }
         
         function downloadJSON() {
-            const dataStr = JSON.stringify(scrapedData, null, 2);
+            // Create filtered data based on scrape type
+            let filteredData = filterDataByType(scrapedData, currentScrapeType);
+            
+            const dataStr = JSON.stringify(filteredData, null, 2);
             const dataBlob = new Blob([dataStr], {type: 'application/json'});
             const url = URL.createObjectURL(dataBlob);
             const link = document.createElement('a');
             link.href = url;
-            link.download = 'scraped_data.json';
+            link.download = getFileName('json');
             link.click();
         }
         
         function downloadCSV() {
-            const links = scrapedData.links;
-            let csv = 'Text,URL,Page\\n';
-            links.forEach(link => {
-                csv += `"${link.text || ''}","${link.url}","${link.page || 1}"\\n`;
-            });
+            const csvType = document.getElementById('csvType').value;
             
-            const dataBlob = new Blob([csv], {type: 'text/csv'});
+            // Create filtered data based on selected CSV type
+            let filteredData = filterDataByType(scrapedData, csvType);
+            
+            let csv = '';
+            let filename = '';
+            
+            switch(csvType) {
+                case 'links':
+                    csv = 'Text,URL,Page\\n';
+                    filteredData.links.forEach(link => {
+                        csv += '"' + escapeCSV(link.text || '') + '","' + escapeCSV(link.url) + '","' + (link.page || 1) + '"\\n';
+                    });
+                    filename = 'links.csv';
+                    break;
+                    
+                case 'images':
+                    csv = 'Alt Text,Source URL,Page\\n';
+                    filteredData.images.forEach(img => {
+                        csv += '"' + escapeCSV(img.alt || '') + '","' + escapeCSV(img.src) + '","' + (img.page || 1) + '"\\n';
+                    });
+                    filename = 'images.csv';
+                    break;
+                    
+                case 'text':
+                    csv = 'Content,Page\\n';
+                    filteredData.paragraphs.forEach(text => {
+                        csv += '"' + escapeCSV(text.content) + '","' + (text.page || 1) + '"\\n';
+                    });
+                    filename = 'text.csv';
+                    break;
+                    
+                case 'headings':
+                    csv = 'Level,Content,Page\\n';
+                    filteredData.headings.forEach(h => {
+                        csv += '"' + escapeCSV(h.level) + '","' + escapeCSV(h.text) + '","' + (h.page || 1) + '"\\n';
+                    });
+                    filename = 'headings.csv';
+                    break;
+                    
+                case 'all':
+                default:
+                    // Combined CSV
+                    csv = 'Type,Content,URL/Alt/Level,Page\\n';
+                    
+                    // Add links
+                    scrapedData.links.forEach(link => {
+                        csv += 'Link,"' + escapeCSV(link.text || '') + '","' + escapeCSV(link.url) + '","' + (link.page || 1) + '"\\n';
+                    });
+                    
+                    // Add images
+                    scrapedData.images.forEach(img => {
+                        csv += 'Image,"' + escapeCSV(img.alt || '') + '","' + escapeCSV(img.src) + '","' + (img.page || 1) + '"\\n';
+                    });
+                    
+                    // Add text
+                    scrapedData.paragraphs.forEach(text => {
+                        csv += 'Text,"' + escapeCSV(text.content) + '","","' + (text.page || 1) + '"\\n';
+                    });
+                    
+                    // Add headings
+                    scrapedData.headings.forEach(h => {
+                        csv += 'Heading,"' + escapeCSV(h.level) + '","' + escapeCSV(h.text) + '","' + (h.page || 1) + '"\\n';
+                    });
+                    
+                    filename = 'all_data.csv';
+                    break;
+            }
+            
+            const dataBlob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
             const url = URL.createObjectURL(dataBlob);
             const link = document.createElement('a');
             link.href = url;
-            link.download = 'scraped_links.csv';
+            link.download = filename;
             link.click();
+        }
+        
+        function escapeCSV(str) {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/"/g, '""');
+        }
+        
+        function filterDataByType(data, type) {
+            // Create a deep copy of the data
+            let filteredData = JSON.parse(JSON.stringify(data));
+            
+            switch(type) {
+                case 'links':
+                    filteredData.images = [];
+                    filteredData.paragraphs = [];
+                    filteredData.headings = [];
+                    break;
+                case 'images':
+                    filteredData.links = [];
+                    filteredData.paragraphs = [];
+                    filteredData.headings = [];
+                    break;
+                case 'text':
+                    filteredData.links = [];
+                    filteredData.images = [];
+                    filteredData.headings = [];
+                    break;
+                case 'headings':
+                    filteredData.links = [];
+                    filteredData.images = [];
+                    filteredData.paragraphs = [];
+                    break;
+                case 'all':
+                default:
+                    // Keep all data
+                    break;
+            }
+            
+            return filteredData;
+        }
+        
+        function getFileName(extension) {
+            const typeMap = {
+                'links': 'links',
+                'images': 'images',
+                'text': 'text',
+                'headings': 'headings',
+                'all': 'all_data'
+            };
+            
+            const prefix = typeMap[currentScrapeType] || 'scraped';
+            return prefix + '_' + new Date().toISOString().slice(0,10) + '.' + extension;
         }
         
         function downloadAllPages() {
             const pages = scrapedData.all_pages || [];
             let csv = 'Page,URL,Status\\n';
             pages.forEach(page => {
-                csv += `"${page.page_number}","${page.url}","${page.status}"\\n`;
+                csv += '"' + page.page_number + '","' + page.url + '","' + page.status + '"\\n';
             });
             
-            const dataBlob = new Blob([csv], {type: 'text/csv'});
+            const dataBlob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
             const url = URL.createObjectURL(dataBlob);
             const link = document.createElement('a');
             link.href = url;
@@ -499,8 +666,7 @@ HTML_TEMPLATE = """
         }
     </script>
 </body>
-</html>
-"""
+</html>'''
 
 class WebScraper:
     def __init__(self, url):
@@ -705,7 +871,8 @@ class WebScraper:
             'total_pages': 0,
             'base_url': self.base_url,
             'start_url': self.url,
-            'total_time': 0
+            'total_time': 0,
+            'scrape_type': 'all'
         }
         
         start_time = time.time()
@@ -809,7 +976,8 @@ class WebScraper:
             'start_url': self.url,
             'total_time': 0,
             'timestamp': datetime.now().isoformat(),
-            'last_page_url': self.url
+            'last_page_url': self.url,
+            'scrape_type': 'all'
         }
 
 @app.route('/')
@@ -841,18 +1009,22 @@ def scrape():
         else:
             results = scraper.scrape_single_page()
         
+        # Add scrape type to results
+        results['scrape_type'] = scrape_type
+        
         # Filter by scrape type if needed
         if scrape_type != 'all':
-            filter_results(results, scrape_type)
+            filter_results_by_type(results, scrape_type)
         
         return jsonify(results)
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-def filter_results(results, scrape_type):
+def filter_results_by_type(results, scrape_type):
     """Filter results based on scrape type"""
     if scrape_type == 'links':
+        # Keep only links, remove others
         results['images'] = []
         results['paragraphs'] = []
         results['headings'] = []
@@ -869,6 +1041,67 @@ def filter_results(results, scrape_type):
         results['images'] = []
         results['paragraphs'] = []
 
+# Add new routes for direct downloads
+@app.route('/download/<data_type>', methods=['GET'])
+def download_data(data_type):
+    """Direct download endpoint for different data types"""
+    try:
+        # Get parameters from request
+        url = request.args.get('url')
+        scrape_type = request.args.get('type', 'all')
+        
+        if not url:
+            return jsonify({'error': 'URL required'}), 400
+        
+        scraper = WebScraper(url)
+        results = scraper.scrape_single_page()
+        
+        # Filter based on type
+        if scrape_type != 'all':
+            filter_results_by_type(results, scrape_type)
+        
+        # Generate CSV based on data_type
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        if data_type == 'links':
+            writer.writerow(['Text', 'URL', 'Page'])
+            for link in results.get('links', []):
+                writer.writerow([link.get('text', ''), link.get('url', ''), link.get('page', 1)])
+            filename = 'links.csv'
+            
+        elif data_type == 'images':
+            writer.writerow(['Alt Text', 'Source URL', 'Page'])
+            for img in results.get('images', []):
+                writer.writerow([img.get('alt', ''), img.get('src', ''), img.get('page', 1)])
+            filename = 'images.csv'
+            
+        elif data_type == 'headings':
+            writer.writerow(['Level', 'Text', 'Page'])
+            for heading in results.get('headings', []):
+                writer.writerow([heading.get('level', ''), heading.get('text', ''), heading.get('page', 1)])
+            filename = 'headings.csv'
+            
+        elif data_type == 'text':
+            writer.writerow(['Content', 'Page'])
+            for paragraph in results.get('paragraphs', []):
+                writer.writerow([paragraph.get('content', ''), paragraph.get('page', 1)])
+            filename = 'text.csv'
+            
+        else:
+            return jsonify({'error': 'Invalid data type'}), 400
+        
+        output.seek(0)
+        return send_file(
+            io.BytesIO(output.getvalue().encode('utf-8')),
+            mimetype='text/csv',
+            as_attachment=True,
+            download_name=filename
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     # Disable SSL warnings
     import urllib3
@@ -879,6 +1112,7 @@ if __name__ == '__main__':
     print("=" * 60)
     print("📍 Buka browser dan akses: http://127.0.0.1:5000")
     print("📄 Fitur Pagination: Auto-detect next page links")
+    print("📥 Download Options: Pilih jenis data untuk CSV")
     print("⏱️  Delay antar halaman: Konfigurasi di UI")
     print("⛔ Tekan CTRL+C untuk berhenti")
     print("=" * 60)
